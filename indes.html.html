@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>几何切割：AC=3, BC=4</title>
+    <style>
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            overflow: hidden; background-color: #f9f9f9;
+            font-family: sans-serif; touch-action: none;
+        }
+        #toolbar {
+            position: absolute; top: 20px; left: 20px; z-index: 10;
+            background: rgba(255, 255, 255, 0.95); padding: 10px 15px;
+            border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+        }
+        button {
+            padding: 8px 16px; font-size: 14px; cursor: pointer;
+            background-color: #000080; color: white; border: none;
+            border-radius: 4px; transition: all 0.2s;
+        }
+        button:hover { background-color: #0000b3; }
+        button.active {
+            background-color: #cc0000;
+            box-shadow: 0 0 0 3px rgba(204, 0, 0, 0.3);
+        }
+        .btn-danger { background-color: #666; }
+        .btn-danger:hover { background-color: #888; }
+        canvas { display: block; cursor: crosshair; }
+    </style>
+</head>
+<body>
+
+<div id="toolbar">
+    <button id="cutModeBtn">切割</button>
+    <button id="toggleGridBtn">隐藏</button>
+    <button id="resetBtn" class="btn-danger">重置</button>
+</div>
+
+<canvas id="myCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('myCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // ================== 全局配置 ==================
+    const GRID_SIZE = 40;
+    let showGrid = true;
+    let gridOffsetX = 0;
+    let gridOffsetY = 0;
+    let currentMode = 'drag';
+
+    // ================== 数据结构 ==================
+    let baseShapes = {
+        S1: { points: [], color: 'rgba(140, 150, 200, 0.7)', label: 'S₁' },
+        S2: { points: [], color: 'rgba(160, 251, 160, 0.7)', label: 'S₂' },
+        S3: { points: [], color: 'rgba(255, 153, 153, 0.7)', label: 'S₃' }
+    };
+
+    let cutPieces = [];
+
+    // 顶点 (逻辑坐标): AC=3 (C 在原点，A 向上3格), BC=4 (B 向右4格)
+    let points = { A: { x: 0, y: -3 }, B: { x: 4, y: 0 }, C: { x: 0, y: 0 } };
+
+    let isDrawingCutLine = false;
+    let cutLineStart = null;
+    let cutLineEnd = null;
+    let finishedCutLines = [];
+
+    let draggingPiece = null;
+    let dragStartMouse = { x: 0, y: 0 };
+    let dragStartPiecePoints = [];
+    let draggingVertex = null;
+
+    // ================== 数学工具 ==================
+    function snapToGrid(x, y) {
+        const snappedX = Math.round((x - gridOffsetX) / GRID_SIZE) * GRID_SIZE + gridOffsetX;
+        const snappedY = Math.round((y - gridOffsetY) / GRID_SIZE) * GRID_SIZE + gridOffsetY;
+        return { x: snappedX, y: snappedY };
+    }
+
+    function getScreenPos(pt) {
+        return { x: pt.x * GRID_SIZE + gridOffsetX, y: pt.y * GRID_SIZE + gridOffsetY };
+    }
+
+    function getLogicPos(x, y) {
+        return { x: Math.round((x - gridOffsetX) / GRID_SIZE), y: Math.round((y - gridOffsetY) / GRID_SIZE) };
+    }
+
+    function isPointInPolygon(px, py, poly) {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = poly[i].x, yi = poly[i].y;
+            const xj = poly[j].x, yj = poly[j].y;
+            const intersect = ((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    function getPolygonCentroid(pts) {
+        let cx = 0, cy = 0;
+        pts.forEach(p => { cx += p.x; cy += p.y; });
+        return { x: cx / pts.length, y: cy / pts.length };
+    }
+
+    function polygonArea(pts) {
+        let area = 0;
+        for (let i = 0; i < pts.length; i++) {
+            const j = (i + 1) % pts.length;
+            area += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+        }
+        return Math.abs(area) / 2;
+    }
+
+    // ================== 初始化 ==================
+    function initCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        gridOffsetX = Math.floor(canvas.width / 2) - (2 * GRID_SIZE);
+        gridOffsetY = Math.floor(canvas.height / 2);
+        resetGeometry();
+    }
+
+    // 重置：AC=3, BC=4
+    function resetGeometry() {
+        points = { A: { x: 0, y: -3 }, B: { x: 4, y: 0 }, C: { x: 0, y: 0 } };
+        cutPieces = [];
+        finishedCutLines = [];
+        cutLineStart = null;
+        cutLineEnd = null;
+        isDrawingCutLine = false;
+
+        const A = getScreenPos(points.A);
+        const B = getScreenPos(points.B);
+        const C = getScreenPos(points.C);
+
+        baseShapes.S1.points = getOutwardSquarePoints(B, C, A);
+        baseShapes.S2.points = getOutwardSquarePoints(A, C, B);
+        baseShapes.S3.points = getOutwardSquarePoints(A, B, C);
+
+        draw();
+    }
+
+    function getOutwardSquarePoints(p1, p2, p3) {
+        const dx = p2.x - p1.x; const dy = p2.y - p1.y;
+        const nx = -dy; const ny = dx;
+        const p4 = { x: p1.x + nx, y: p1.y + ny };
+        const p5 = { x: p2.x + nx, y: p2.y + ny };
+        const cross1 = dx * (p3.y - p1.y) - dy * (p3.x - p1.x);
+        const cross2 = dx * ny - dy * nx;
+        if (cross1 * cross2 > 0) {
+            p4.x = p1.x - nx; p4.y = p1.y - ny;
+            p5.x = p2.x - nx; p5.y = p2.y - ny;
+        }
+        return [p1, p2, p5, p4];
+    }
+
+    // ================== 渲染 ==================
+    function drawGrid() {
+        if (!showGrid) return;
+        ctx.strokeStyle = '#e0e0e0';
+        ctx.lineWidth = 1;
+        const startX = gridOffsetX % GRID_SIZE;
+        for (let x = startX; x < canvas.width; x += GRID_SIZE) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+        }
+        const startY = gridOffsetY % GRID_SIZE;
+        for (let y = startY; y < canvas.height; y += GRID_SIZE) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+        }
+    }
+
+    function drawBaseShapes() {
+        for (let key in baseShapes) {
+            const shape = baseShapes[key];
+            if (shape.points.length < 3) continue;
+            ctx.beginPath();
+            ctx.moveTo(shape.points[0].x, shape.points[0].y);
+            for (let i = 1; i < shape.points.length; i++) ctx.lineTo(shape.points[i].x, shape.points[i].y);
+            ctx.closePath();
+            ctx.fillStyle = shape.color;
+            ctx.fill();
+            ctx.strokeStyle = '#000080';
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+
+            const center = getPolygonCentroid(shape.points);
+            ctx.font = 'italic bold 32px "Times New Roman", serif';
+            ctx.fillStyle = '#000000';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(shape.label, center.x, center.y);
+        }
+    }
+
+    function drawCutPieces() {
+        cutPieces.forEach(piece => {
+            if (piece.isDragging) return;
+            ctx.beginPath();
+            ctx.moveTo(piece.points[0].x, piece.points[0].y);
+            for (let i = 1; i < piece.points.length; i++) ctx.lineTo(piece.points[i].x, piece.points[i].y);
+            ctx.closePath();
+            ctx.fillStyle = piece.color;
+            ctx.fill();
+            ctx.strokeStyle = '#000080';
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+        });
+    }
+
+    function drawFinishedCutLines() {
+        finishedCutLines.forEach(line => {
+            ctx.beginPath();
+            ctx.moveTo(line.p1.x, line.p1.y);
+            ctx.lineTo(line.p2.x, line.p2.y);
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        });
+    }
+
+    function drawActiveCutLine() {
+        if (isDrawingCutLine && cutLineStart && cutLineEnd) {
+            ctx.beginPath();
+            ctx.moveTo(cutLineStart.x, cutLineStart.y);
+            ctx.lineTo(cutLineEnd.x, cutLineEnd.y);
+            ctx.strokeStyle = 'rgba(255, 0, 0, 0.7)';
+            ctx.lineWidth = 3;
+            ctx.setLineDash([8, 6]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            
+            [cutLineStart, cutLineEnd].forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.6)';
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            });
+        }
+    }
+
+    function drawTriangle() {
+        const A = getScreenPos(points.A);
+        const B = getScreenPos(points.B);
+        const C = getScreenPos(points.C);
+
+        ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.lineTo(C.x, C.y); ctx.closePath();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.05)'; ctx.fill();
+        ctx.strokeStyle = '#000000'; ctx.lineWidth = 2; ctx.stroke();
+
+        // 直角符号
+        const size = 18;
+        const cDir = { x: 1, y: 0 };
+        const cDir2 = { x: 0, y: -1 };
+        ctx.beginPath();
+        ctx.moveTo(C.x + size, C.y);
+        ctx.lineTo(C.x + size, C.y - size);
+        ctx.lineTo(C.x, C.y - size);
+        ctx.strokeStyle = '#000000'; ctx.lineWidth = 2; ctx.stroke();
+
+        const vertices = [ { pt: A, label: 'A' }, { pt: B, label: 'B' }, { pt: C, label: 'C' } ];
+        ctx.font = 'italic bold 28px "Times New Roman", serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        vertices.forEach(v => {
+            ctx.beginPath(); ctx.arc(v.pt.x, v.pt.y, 6, 0, Math.PI * 2);
+            ctx.fillStyle = 'red'; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+            let offsetX = v.label === 'A' ? -20 : (v.label === 'B' ? 20 : -20);
+            let offsetY = v.label === 'A' ? -20 : (v.label === 'B' ? 20 : 20);
+            ctx.fillStyle = '#000000'; ctx.fillText(v.label, v.pt.x + offsetX, v.pt.y + offsetY);
+        });
+    }
+
+    function drawDragging() {
+        if (draggingPiece) {
+            const piece = draggingPiece;
+            ctx.beginPath();
+            ctx.moveTo(piece.points[0].x, piece.points[0].y);
+            for (let i = 1; i < piece.points.length; i++) ctx.lineTo(piece.points[i].x, piece.points[i].y);
+            ctx.closePath();
+            ctx.fillStyle = piece.color;
+            ctx.fill();
+            ctx.strokeStyle = '#000080';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        drawGrid();
+        drawBaseShapes();
+        drawCutPieces();
+        drawFinishedCutLines();
+        drawActiveCutLine();
+        drawTriangle();
+        drawDragging();
+    }
+
+    // ================== 事件交互 ==================
+    function getMousePos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        return { x: clientX - rect.left, y: clientY - rect.top };
+    }
+
+    function handleDown(e) {
+        const pos = getMousePos(e);
+
+        if (currentMode === 'cut') {
+            const snapPt = snapToGrid(pos.x, pos.y);
+            isDrawingCutLine = true;
+            cutLineStart = snapPt;
+            cutLineEnd = snapPt;
+            draw();
+            return;
+        }
+
+        const hitRadius = 25;
+        for (let key in points) {
+            const screenPt = getScreenPos(points[key]);
+            if (Math.hypot(pos.x - screenPt.x, pos.y - screenPt.y) < hitRadius) {
+                draggingVertex = key;
+                return;
+            }
+        }
+
+        for (let i = cutPieces.length - 1; i >= 0; i--) {
+            const piece = cutPieces[i];
+            if (isPointInPolygon(pos.x, pos.y, piece.points)) {
+                draggingPiece = piece;
+                piece.isDragging = true;
+                dragStartMouse = { x: pos.x, y: pos.y };
+                dragStartPiecePoints = piece.points.map(p => ({x: p.x, y: p.y}));
+                cutPieces.splice(i, 1);
+                cutPieces.push(piece);
+                canvas.style.cursor = 'grabbing';
+                draw();
+                return;
+            }
+        }
+    }
+
+    function handleMove(e) {
+        e.preventDefault();
+        const pos = getMousePos(e);
+
+        if (currentMode === 'cut' && isDrawingCutLine) {
+            const snapPt = snapToGrid(pos.x, pos.y);
+            cutLineEnd = snapPt;
+            draw();
+            return;
+        }
+
+        if (draggingVertex) {
+            const snapPt = snapToGrid(pos.x, pos.y);
+            const logicPt = getLogicPos(snapPt.x, snapPt.y);
+            if (draggingVertex === 'A') {
+                if (logicPt.x !== points.B.x && logicPt.y !== points.C.y) {
+                    points.A = { x: logicPt.x, y: logicPt.y }; points.C.x = logicPt.x;
+                }
+            } else if (draggingVertex === 'B') {
+                if (logicPt.x !== points.C.x && logicPt.y !== points.A.y) {
+                    points.B = { x: logicPt.x, y: logicPt.y }; points.C.y = logicPt.y;
+                }
+            } else if (draggingVertex === 'C') {
+                if (logicPt.x !== points.B.x && logicPt.y !== points.A.y) {
+                    points.C = { x: logicPt.x, y: logicPt.y }; points.A.x = logicPt.x; points.B.y = logicPt.y;
+                }
+            }
+            const A = getScreenPos(points.A);
+            const B = getScreenPos(points.B);
+            const C = getScreenPos(points.C);
+            baseShapes.S1.points = getOutwardSquarePoints(B, C, A);
+            baseShapes.S2.points = getOutwardSquarePoints(A, C, B);
+            baseShapes.S3.points = getOutwardSquarePoints(A, B, C);
+            cutPieces = [];
+            finishedCutLines = [];
+            draw();
+            return;
+        }
+
+        if (draggingPiece) {
+            const dx = pos.x - dragStartMouse.x;
+            const dy = pos.y - dragStartMouse.y;
+            draggingPiece.points.forEach((p, i) => {
+                p.x = dragStartPiecePoints[i].x + dx;
+                p.y = dragStartPiecePoints[i].y + dy;
+            });
+            draw();
+            return;
+        }
+    }
+
+    function handleUp() {
+        if (currentMode === 'cut' && isDrawingCutLine) {
+            if (cutLineStart && cutLineEnd && 
+                (Math.abs(cutLineStart.x - cutLineEnd.x) > 1 || Math.abs(cutLineStart.y - cutLineEnd.y) > 1)) {
+                
+                finishedCutLines.push({
+                    p1: { x: cutLineStart.x, y: cutLineStart.y },
+                    p2: { x: cutLineEnd.x, y: cutLineEnd.y }
+                });
+
+                checkAndExtractRegion();
+            }
+            
+            isDrawingCutLine = false;
+            cutLineStart = null;
+            cutLineEnd = null;
+            draw();
+            return;
+        }
+
+        if (draggingVertex) { draggingVertex = null; draw(); return; }
+        if (draggingPiece) { 
+            draggingPiece.isDragging = false;
+            draggingPiece = null; 
+            canvas.style.cursor = 'default'; 
+            draw(); 
+            return; 
+        }
+    }
+
+    // ================== 闭合检测与区域提取 ==================
+    function checkAndExtractRegion() {
+        if (finishedCutLines.length < 3) return;
+
+        const startPoint = finishedCutLines[finishedCutLines.length - 1].p1;
+        const endPoint = finishedCutLines[finishedCutLines.length - 1].p2;
+        
+        let chain = [{ p1: startPoint, p2: endPoint }];
+        let visited = new Set([finishedCutLines.length - 1]);
+        let currentEnd = endPoint;
+        let found = false;
+        
+        for (let step = 0; step < finishedCutLines.length; step++) {
+            if (Math.abs(currentEnd.x - startPoint.x) < 1 && Math.abs(currentEnd.y - startPoint.y) < 1) {
+                found = true;
+                break;
+            }
+            let nextIndex = -1;
+            for (let i = 0; i < finishedCutLines.length; i++) {
+                if (visited.has(i)) continue;
+                const line = finishedCutLines[i];
+                if (Math.abs(line.p1.x - currentEnd.x) < 1 && Math.abs(line.p1.y - currentEnd.y) < 1) {
+                    nextIndex = i;
+                    chain.push(line);
+                    currentEnd = line.p2;
+                    break;
+                }
+                if (Math.abs(line.p2.x - currentEnd.x) < 1 && Math.abs(line.p2.y - currentEnd.y) < 1) {
+                    nextIndex = i;
+                    chain.push({ p1: line.p2, p2: line.p1 });
+                    currentEnd = line.p1;
+                    break;
+                }
+            }
+            if (nextIndex === -1) break;
+            visited.add(nextIndex);
+        }
+
+        if (!found && !(Math.abs(currentEnd.x - startPoint.x) < 1 && Math.abs(currentEnd.y - startPoint.y) < 1)) {
+            return;
+        }
+
+        const polygon = chain.map(seg => ({ x: seg.p1.x, y: seg.p1.y }));
+        const uniquePolygon = [];
+        for (let i = 0; i < polygon.length; i++) {
+            const p = polygon[i];
+            const next = polygon[(i + 1) % polygon.length];
+            if (Math.abs(p.x - next.x) > 0.5 || Math.abs(p.y - next.y) > 0.5) {
+                uniquePolygon.push(p);
+            }
+        }
+
+        if (uniquePolygon.length < 3 || polygonArea(uniquePolygon) < 100) return;
+
+        const center = getPolygonCentroid(uniquePolygon);
+        let sourceType = null;
+        for (let key in baseShapes) {
+            if (isPointInPolygon(center.x, center.y, baseShapes[key].points)) {
+                sourceType = key;
+                break;
+            }
+        }
+
+        if (!sourceType) return;
+
+        const newPiece = {
+            points: uniquePolygon.map(p => ({ x: p.x, y: p.y })),
+            color: baseShapes[sourceType].color,
+            sourceType: sourceType,
+            isDragging: false
+        };
+        cutPieces.push(newPiece);
+
+        finishedCutLines = [];
+    }
+
+    // ================== UI 事件 ==================
+    document.getElementById('cutModeBtn').addEventListener('click', function() {
+        if (currentMode === 'cut') {
+            currentMode = 'drag';
+            this.classList.remove('active');
+            this.textContent = '切割';
+        } else {
+            currentMode = 'cut';
+            this.classList.add('active');
+            this.textContent = '退出';
+        }
+        draw();
+    });
+
+    document.getElementById('toggleGridBtn').addEventListener('click', function() {
+        showGrid = !showGrid;
+        this.textContent = showGrid ? '隐藏' : '显示';
+        draw();
+    });
+
+    document.getElementById('resetBtn').addEventListener('click', function() {
+        resetGeometry();
+    });
+
+    canvas.addEventListener('mousedown', handleDown);
+    canvas.addEventListener('touchstart', handleDown, {passive: false});
+    window.addEventListener('mousemove', handleMove);
+    window.addEventListener('touchmove', handleMove, {passive: false});
+    window.addEventListener('mouseup', handleUp);
+    window.addEventListener('touchend', handleUp);
+    window.addEventListener('touchcancel', handleUp);
+
+    window.addEventListener('resize', initCanvas);
+    initCanvas();
+
+</script>
+</body>
+</html>
